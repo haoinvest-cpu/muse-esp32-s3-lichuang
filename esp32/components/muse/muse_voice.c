@@ -35,6 +35,7 @@
 #include "muse_input.h"
 #include "muse_mem.h"
 #include "muse_settings.h"
+#include "muse_wake.h"
 #include "muse_i18n.h"
 #include "muse_state.h"
 #include "muse_wifi.h"
@@ -155,6 +156,9 @@ static void idle_capture(void)
         s_settle--;
         return;
     }
+    /* Voice wake hears what the pre-roll keeps (and only that: the
+     * settle window above keeps Muse's own tail out of both). */
+    muse_wake_feed_idle(s_chunk, MUSE_AUDIO_CHUNK);
     pre_chunk_t *c = &s_pre[s_pre_next];
 #if MUSE_LOW_MEM
     c->start = s_pre_enc;
@@ -227,6 +231,9 @@ static void go_live(void)
 /* One chunk of speech: into the stats, and on to Hatch, by way of the kept note if there is one. */
 static void take(rec_stats_t *st, const int16_t *pcm)
 {
+    /* Voice wake's VAD hears the turn (pre-roll included) so it can
+     * call the end of a wake-started turn; dropped for other turns. */
+    muse_wake_feed_record(pcm, MUSE_AUDIO_CHUNK);
     keep(st, pcm, MUSE_AUDIO_CHUNK);
     if (!s_rec) {
         if (s_live) {

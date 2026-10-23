@@ -28,6 +28,9 @@ if(CONFIG_MUSE_ENABLED)
         "muse_console.c"
         "muse_state.c"
         "muse_battery.c"
+        "muse_sht31.c"
+        "muse_weather.c"
+        "muse_wake.c"
         "muse_ui.c"
         "muse_audio.c"
         "muse_pmu.c"
@@ -118,13 +121,14 @@ set(muse_priv_requires
     bt esp-tls mbedtls esp_app_format esp_http_client
     noise_core minimp3
     esp_lcd esp_adc esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_uart esp_wifi
-    esp_driver_pcnt)
+    esp_driver_pcnt sdmmc esp_driver_sdmmc fatfs)
 list(APPEND muse_priv_requires camera)
 
 idf_component_register(
     SRCS ${srcs}
     INCLUDE_DIRS "."
     EMBED_FILES ${embed}
+    LDFRAGMENTS linker.lf
     WHOLE_ARCHIVE   # muse_lv_mem.c provides symbols only LVGL references
     REQUIRES esp_driver_gpio esp_driver_i2c
     PRIV_REQUIRES ${muse_priv_requires}

@@ -23,6 +23,7 @@
 #include "esp_app_desc.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
+#include "sdkconfig.h"
 
 #include "muse_audio.h"
 #include "muse_battery.h"
@@ -99,6 +100,9 @@ static lv_obj_t *s_ble_sw, *s_ble_status;
 
 /* Sound page. */
 static lv_obj_t *s_spk_sw, *s_vol_val, *s_vol_sl, *s_gain_val, *s_gain_sl, *s_bright_val, *s_bright_sl, *s_mic_bar, *s_mic_val;
+#if CONFIG_MUSE_BOARD_LICHUANG_SZP
+static lv_obj_t *s_wake_sw;   /* voice wake exists only on the SZP */
+#endif
 
 /* Sleep page. */
 static const int SLEEP_CHOICES[] = { 0, 30, 60, 120, 300, 600 };
@@ -997,6 +1001,13 @@ static void on_speaker_sw(lv_event_t *e)
     muse_settings_set_speaker_on(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
+#if CONFIG_MUSE_BOARD_LICHUANG_SZP
+static void on_wake_sw(lv_event_t *e)
+{
+    muse_settings_set_wake_on(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+#endif
+
 static void on_volume(lv_event_t *e)
 {
     int v = lv_slider_get_value(s_vol_sl);
@@ -1036,6 +1047,9 @@ static void build_sound_page(lv_obj_t *tile)
     lv_obj_t *list;
     s_sound = page(tile, muse_tr("SOUND"), true, &list);
     s_spk_sw = switch_row(list, muse_tr("Speaker"), muse_settings_speaker_on(), on_speaker_sw);
+#if CONFIG_MUSE_BOARD_LICHUANG_SZP
+    s_wake_sw = switch_row(list, muse_tr("Voice wake"), muse_settings_wake_on(), on_wake_sw);
+#endif
     s_vol_sl = slider(list, muse_tr("Volume"), 0, 100, muse_settings_volume(), &s_vol_val, on_volume);
     s_gain_sl = slider(list, muse_tr("Mic gain"), 0, MUSE_MIC_GAIN_MAX / 3, muse_settings_mic_gain() / 3, &s_gain_val, on_gain);
 
@@ -1068,6 +1082,12 @@ static void tick_sound(void)
     if (on != lv_obj_has_state(s_spk_sw, LV_STATE_CHECKED)) {
         lv_obj_set_state(s_spk_sw, LV_STATE_CHECKED, on);
     }
+#if CONFIG_MUSE_BOARD_LICHUANG_SZP
+    bool wake = muse_settings_wake_on();
+    if (s_wake_sw && wake != lv_obj_has_state(s_wake_sw, LV_STATE_CHECKED)) {
+        lv_obj_set_state(s_wake_sw, LV_STATE_CHECKED, wake);
+    }
+#endif
     float db = muse_voice_monitor_db();
     int v = (int)(db + 70.0f);
     v = v < 0 ? 0 : (v > 60 ? 60 : v);

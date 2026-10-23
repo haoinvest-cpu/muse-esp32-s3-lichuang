@@ -61,6 +61,7 @@ static const struct { const char *en, *zh; } translations[] = {
     { "Power off", "关机" },
     { "Volume", "音量" },
     { "Speaker", "扬声器" },
+    { "Voice wake", "语音唤醒" },
     { "Brightness", "亮度" },
     { "Mic gain", "麦克风增益" },
     { "Mic level", "麦克风电平" },

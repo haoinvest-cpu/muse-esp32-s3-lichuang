@@ -463,9 +463,16 @@ static void dispatch_command_ex(const uint8_t *data, size_t len, bool decrypted)
             }
             // 8 KB stack — mbedtls 3.6 (IDF v6) needs significantly more
             // stack during TLS handshake than v5's 3.x (~2 KB more peak).
+            // PSRAM stack (Lichuang SZP): as with pair_confirm_to and
+            // scan_rfsh, an 8 KB internal stack no longer fits this board's
+            // fragmented internal heap (largest block ~4 KB once the UI,
+            // Wi-Fi and BLE are up), so a plain xTaskCreate fails and every
+            // provision_v2 is rejected with error_operation_in_progress.
             a->session_generation = link_pairing_mark_provisioning_active();
             if (a->session_generation == 0
-                || xTaskCreate(provision_task, "prov", 8192, a, 5, NULL) != pdPASS) {
+                || xTaskCreatePinnedToCoreWithCaps(provision_task, "prov", 8192, a, 5, NULL,
+                                                   tskNO_AFFINITY,
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
                 uint32_t generation = a->session_generation;
                 secure_free_str(a->ssid);
                 secure_free_str(a->password);

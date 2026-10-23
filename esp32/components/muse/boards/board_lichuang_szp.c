@@ -44,6 +44,9 @@
 #include "muse_audio.h"
 #include "muse_board.h"
 #include "muse_mem.h"
+#include "muse_sht31.h"
+#include "muse_wake.h"
+#include "muse_weather.h"
 
 static const char *TAG = "board";
 
@@ -102,6 +105,33 @@ static esp_err_t init(void)
         .flags.enable_internal_pullup = true,
     };
     ESP_RETURN_ON_ERROR(i2c_new_master_bus(&i2c_cfg, &s_i2c), TAG, "i2c");
+
+    /* Optional SHT31 on the J1 expansion header, on this same bus. Absent
+     * is the normal case (the driver logs it once); any other failure is a
+     * warning here too, and the boot carries on either way. */
+    esp_err_t sht_err = muse_sht31_start(s_i2c);
+    if (sht_err != ESP_OK && sht_err != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "SHT31 start failed: %s", esp_err_to_name(sht_err));
+    }
+
+    /* Weather hub on the Pi hotspot (muse_weather): forecast for the
+     * weather tile, a wall clock for the board, and the durable home
+     * for SHT31 history points. Self-retrying; a hub that is down just
+     * leaves the tile waiting. */
+    esp_err_t wx_err = muse_weather_start();
+    if (wx_err != ESP_OK) {
+        ESP_LOGW(TAG, "weather start failed: %s", esp_err_to_name(wx_err));
+    }
+
+    /* Voice wake (muse_wake): esp-sr WakeNet over the voice pipeline's
+     * idle audio, off by default (the settings switch arms it). Starts
+     * dormant -- settings and the audio pipeline are not up yet at
+     * board init, and the module builds its AFE lazily once enabled --
+     * so a board that never enables it pays only a parked task. */
+    esp_err_t wake_err = muse_wake_start();
+    if (wake_err != ESP_OK) {
+        ESP_LOGW(TAG, "voice wake start failed: %s", esp_err_to_name(wake_err));
+    }
 
     const i2c_device_config_t exp_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,

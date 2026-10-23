@@ -71,6 +71,9 @@
 #if CONFIG_HOMEHUB_RETERMINAL_SHT4X
 #include "reterminal_sht4x.h"
 #endif
+#if CONFIG_HOMEHUB_LICHUANG_SHT31
+#include "szp_sht31.h"
+#endif
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
 #endif
@@ -227,8 +230,17 @@ static BaseType_t start_confirm_timeout(TaskFunction_t task, const char *name,
     if (s_confirm_generation == generation
         && link_pairing_session_is_current(session_generation)) {
         s_confirm_session_generation = session_generation;
-        rc = xTaskCreate(task, name, 4096, (void *)(uintptr_t)generation, 4,
-                         &s_confirm_timeout_task);
+        /* Local change (Lichuang SZP port): this waiter task's 4096-byte
+         * stack used to come from internal RAM, and creating it failed
+         * at pairing-confirm time when internal heap was down to ~13K
+         * free / ~6K largest block ("failed to start pairing
+         * confirmation timer" -> error_pairing_unavailable). The task
+         * only delays, sends a BLE status and disconnects — no flash or
+         * mmap work — so a PSRAM stack is safe here. */
+        rc = xTaskCreatePinnedToCoreWithCaps(task, name, 4096,
+                                             (void *)(uintptr_t)generation, 4,
+                                             &s_confirm_timeout_task,
+                                             tskNO_AFFINITY, MALLOC_CAP_SPIRAM);
     }
     setup_window_lock_give();
     return rc;
@@ -1305,7 +1317,15 @@ static bool schedule_scan_refresh(bool reply_requested, bool *joined) {
         return true;
     }
 
-    if (xTaskCreate(scan_refresh_task, "scan_rfsh", 4096, NULL, 4, NULL)
+    /* Local change (Lichuang SZP port): PSRAM stack, same reasoning as
+     * start_confirm_timeout() — creating this 4096-byte internal-stack
+     * task failed when the app requested a Wi-Fi scan during
+     * provisioning ("failed to start wifi scan task" at ~12K free /
+     * ~4K largest internal). The task only scans and merges a RAM
+     * cache; no flash or mmap work. */
+    if (xTaskCreatePinnedToCoreWithCaps(scan_refresh_task, "scan_rfsh", 4096,
+                                        NULL, 4, NULL, tskNO_AFFINITY,
+                                        MALLOC_CAP_SPIRAM)
         != pdPASS) {
         atomic_store_explicit(&s_scan_refresh_flags, 0, memory_order_release);
         ESP_LOGE(TAG, "failed to start wifi scan task");
@@ -1910,6 +1930,11 @@ static cJSON *on_ws_command(
         return reterminal_sht4x_command();
     }
 #endif
+#if CONFIG_HOMEHUB_LICHUANG_SHT31
+    if (strcmp(command, "sensors.read") == 0) {
+        return szp_sht31_command();
+    }
+#endif
     if (strcmp(command, "device.reset_vm") == 0) {
         return queue_ws_control(WS_CONTROL_RESET_VM, NULL);
     }
@@ -2314,7 +2339,16 @@ bool app_hatch_vm_credentials(const char *want_vm, char *vm_id, size_t id_cap,
         .vm_name = vm_name, .name_cap = name_cap,
         .waiter = xTaskGetCurrentTaskHandle(),
     };
-    if (xTaskCreate(hatch_vm_task, "muse_vm", 8192, &req, 4, NULL) != pdPASS) {
+    // PSRAM stack (Lichuang SZP): an 8 KB internal stack no longer fits
+    // this board's fragmented internal heap (largest block ~4 KB), so the
+    // plain xTaskCreate above always failed and every muse chat connect
+    // died in resolve_vm with "Can't reach Muse's server". The header
+    // comment's internal-stack rationale (NVS access) is noted, but the
+    // provision task already runs this same mix (HTTPS + NVS commit) from
+    // a PSRAM stack without issue on this board.
+    if (xTaskCreatePinnedToCoreWithCaps(hatch_vm_task, "muse_vm", 8192, &req, 4, NULL,
+                                        tskNO_AFFINITY,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         return false;
     }
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -2325,6 +2359,15 @@ bool app_hatch_vm_credentials(const char *want_vm, char *vm_id, size_t id_cap,
 
 #if CONFIG_MUSE_ENABLED
 void app_ble_companion_set(bool advertise) {
+    if (advertise && !ble_server_is_started()) {
+        /* Paired boots no longer pre-start the BLE stack (see the boot
+         * path): starting it this late would ask the controller for a
+         * 30 KB internal block the fragmented heap cannot serve, and
+         * the wake AFE has the room now. The companion comes back only
+         * after a setup reset reboots into pairing, where BLE is up. */
+        ESP_LOGW(TAG, "BLE companion unavailable while paired; skipped");
+        return;
+    }
     if (advertise) start_ble_setup_server_if_needed();
     ble_server_set_companion_advertising(advertise);
     if (config_setup_complete()) ui_set_ble(advertise ? "companion" : "off");
@@ -2655,12 +2698,15 @@ void app_run(void) {
     } else {
         ui_set_ble("off");
         ESP_LOGI(TAG, "BLE setup disabled; long-press reset to pair again");
-#if CONFIG_MUSE_ENABLED && CONFIG_SPIRAM
-        // Muse may turn on its BLE companion later. The controller needs a
-        // 30 KB internal block that TLS and the VM session leave fragmented,
-        // so bring the stack up now; it stays silent until advertising is on.
-        start_ble_setup_server_if_needed();
-#endif
+        // The BLE stack is deliberately NOT started in the paired state.
+        // It used to be brought up here so the Muse BLE companion could
+        // be enabled later (its controller wants a 30 KB internal block
+        // that the running system leaves fragmented), but the controller
+        // and the NimBLE host hold ~40 KB of internal RAM between them,
+        // and the wake-word AFE needs that room more. Pairing recovery
+        // is unaffected: a setup reset reboots into the unpaired branch
+        // above, which starts BLE at boot. The settings BLE companion
+        // stays unavailable while paired (app_ble_companion_set no-ops).
     }
 
     // Dev override: CONFIG_HOMEHUB_WIFI_SSID lets us skip BLE provisioning

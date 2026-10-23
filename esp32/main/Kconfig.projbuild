@@ -315,6 +315,17 @@ menu "ESP32 Device SDK"
             tenths of a degree Celsius. The onboard sensor reads warm from
             board heat; -33 (-3.3 C, about -6 F) is a starting point.
 
+    config HOMEHUB_LICHUANG_SHT31
+        bool "Lichuang SZP external SHT31 sensor (sensors.read)"
+        depends on MUSE_BOARD_LICHUANG_SZP
+        default y
+        help
+            Answer sensors.read with the latest temperature and humidity
+            from the Sensirion SHT31 module plugged into the board's I2C
+            expansion port (J1). The sampler lives in the muse component
+            (muse_sht31.c, started by the board file); this only wires up
+            the Link command.
+
     config HOMEHUB_DISPLAY_COMMANDS
         bool
         default y if HOMEHUB_DISPLAY

@@ -1,0 +1,33 @@
+# Move the esp-sr family's static .bss out of internal DRAM into PSRAM.
+# These libraries (noise-suppression engine, esp-dl kernels, audio
+# processor) reserve ~32 KB of .bss whether or not the AFE pipeline is
+# running; on this board internal DRAM is the scarcest resource there is.
+# Their state is only touched from task context, never from an ISR, so
+# PSRAM residency is safe. Gated on the IDF extram-bss switch so other
+# builds are unaffected.
+# (scheme 'extram_bss' itself is defined by esp_wifi's linker.lf;
+# redefining it here makes ldgen fail with a duplicate-definition error.)
+
+[mapping:nsnet3_extram]
+archive: libnsnet3.a
+entries:
+    if ESP_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        * (extram_bss)
+
+[mapping:dl_lib_extram]
+archive: libdl_lib.a
+entries:
+    if ESP_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        * (extram_bss)
+
+[mapping:esp_dl_extram]
+archive: libespressif__esp-dl.a
+entries:
+    if ESP_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        * (extram_bss)
+
+[mapping:esp_audio_processor_extram]
+archive: libesp_audio_processor.a
+entries:
+    if ESP_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        * (extram_bss)

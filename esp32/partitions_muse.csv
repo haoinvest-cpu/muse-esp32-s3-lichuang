@@ -25,3 +25,9 @@ ota_0,     app,  ota_0,   0x20000,  4M,
 ota_1,     app,  ota_1,   0x420000, 4M,
 prod_data, data, 0x40,    0x820000, 0x1000,
 prod_bak,  data, 0x41,    0x821000, 0x1000,
+# Voice-wake models for esp-sr (WakeNet + VAD now, room for a MultiNet
+# later), appended after every existing partition: no offset above
+# moves, so NVS, pairing and OTA slots are untouched. esp-sr's build
+# packs the selected models into srmodels.bin and flashes it here;
+# muse_wake finds the partition by its label, "model".
+model,     data, spiffs,  0x822000, 3M,

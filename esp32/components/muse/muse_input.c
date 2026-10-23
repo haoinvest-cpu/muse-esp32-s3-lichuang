@@ -82,6 +82,16 @@ static void post(muse_ptt_t type, bool wake)
     xQueueSend(s_queue, &ev, 0);
 }
 
+/* For muse_wake: the voice-wake detector "presses" and "releases" the
+ * talk button through the same post the physical button and the serial
+ * console use, so the voice pipeline sees no difference. */
+void muse_input_post_ptt(muse_ptt_t type, bool wake)
+{
+    if (s_queue) {
+        post(type, wake);
+    }
+}
+
 static bool update_power(void);
 
 static void power_off(void)
@@ -740,11 +750,11 @@ static void serial_task(void *arg)
 esp_err_t muse_input_start(QueueHandle_t queue)
 {
     s_queue = queue;
-    if (xTaskCreate(input_task, "muse_input", 4096, NULL, 6, &s_input) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(input_task, "muse_input", 4096, NULL, 6, &s_input, tskNO_AFFINITY, MALLOC_CAP_SPIRAM) != pdPASS) {
         return ESP_FAIL;
     }
     /* Bench-test and setup console; the input still works if it can't start. */
-    xTaskCreate(serial_task, "muse_serial", 3584, NULL, 5, NULL);
+    xTaskCreatePinnedToCoreWithCaps(serial_task, "muse_serial", 3584, NULL, 5, NULL, tskNO_AFFINITY, MALLOC_CAP_SPIRAM);
     return ESP_OK;
 }
 

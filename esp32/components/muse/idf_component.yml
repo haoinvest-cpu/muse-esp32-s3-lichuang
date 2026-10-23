@@ -16,6 +16,10 @@ dependencies:
   idf:
     version: ">=5.5"
   espressif/cjson: "~1.7"
+  espressif/esp-sr:
+    version: "^2.4"
+    rules:
+      - if: "$CONFIG{MUSE_BOARD_ID} == \"lichuang_szp\""
   lvgl/lvgl:
     version: "9.5.0"
     public: true

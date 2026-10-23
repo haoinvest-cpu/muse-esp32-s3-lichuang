@@ -39,6 +39,7 @@ static struct {
     uint16_t sleep_s;
     bool wifi_on;
     bool ble_on;
+    bool wake_on;
     bool chinese;
     char ssid[MUSE_SSID_MAX + 1];
     char pass[MUSE_PASS_MAX + 1];
@@ -134,6 +135,9 @@ esp_err_t muse_settings_init(void)
     if (nvs_get_u8(s_nvs, "ble_on", &b) == ESP_OK) {
         s.ble_on = b;
     }
+    if (nvs_get_u8(s_nvs, "wake_on", &b) == ESP_OK) {
+        s.wake_on = b;
+    }
     load_str("ssid", s.ssid, sizeof(s.ssid));
     load_str("pass", s.pass, sizeof(s.pass));
     load_str("host", s.host, sizeof(s.host));
@@ -161,6 +165,7 @@ int muse_settings_brightness(void) { return s.brightness; }
 int muse_settings_sleep_s(void) { return s.sleep_s; }
 bool muse_settings_wifi_on(void) { return s.wifi_on; }
 bool muse_settings_ble_on(void) { return s.ble_on; }
+bool muse_settings_wake_on(void) { return s.wake_on; }
 bool muse_settings_chinese(void) { return s.chinese; }
 
 void muse_settings_set_chinese(bool chinese)
@@ -253,6 +258,13 @@ void muse_settings_set_ble_on(bool on)
     s.ble_on = on;
     save_u8("ble_on", on);
     notify(MUSE_SETTING_BLE);
+}
+
+void muse_settings_set_wake_on(bool on)
+{
+    s.wake_on = on;
+    save_u8("wake_on", on);
+    notify(MUSE_SETTING_WAKE);
 }
 
 void muse_settings_set_wifi(const char *ssid, const char *pass)

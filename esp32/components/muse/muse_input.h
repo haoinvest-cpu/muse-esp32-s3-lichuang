@@ -46,5 +46,10 @@ typedef struct {
 /* PTT events are posted to `queue` (items are muse_input_event_t). */
 esp_err_t muse_input_start(QueueHandle_t queue);
 
+/* Posts a PTT event from outside the input task (muse_wake's detector,
+ * playing the talk button). Same queue, same `wake` meaning; a no-op
+ * before muse_input_start. */
+void muse_input_post_ptt(muse_ptt_t type, bool wake);
+
 /* Plays the goodbye animation and powers off (from the input task). */
 void muse_input_request_power_off(void);

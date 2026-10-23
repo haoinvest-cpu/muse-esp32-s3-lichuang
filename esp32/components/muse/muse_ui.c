@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -41,6 +42,8 @@
 #include "muse_pixel.h"
 #include "muse_settings.h"
 #include "muse_settings_ui.h"
+#include "muse_sht31.h"
+#include "muse_weather.h"
 #include "muse_state.h"
 #include "muse_text.h"
 #include "muse_i18n.h"
@@ -71,6 +74,8 @@ static const char *TAG = "muse_ui";
 #define COLOR_ACCENT 0xa77dff
 #define COLOR_DOT_OFF 0x3a3358
 #define COLOR_LIT 0xf2efff
+#define COLOR_CHART_TEMP 0xff7043   /* sensor chart: temperature series */
+#define COLOR_CHART_RH   0x42a5f5   /* sensor chart: humidity series */
 #define SETTINGS_TICK_S 0.25f
 
 /* Text on 128 px screens, as in the button menu (muse_menu.c). */
@@ -92,9 +97,12 @@ static int s_canvas_px;     /* Muse's size on screen */
 static int s_dy;            /* full layout: offset from a 466 px tall screen */
 static lv_indev_t *s_indev;
 static lv_obj_t *s_tv;
+static lv_obj_t *s_sensor;     /* tileview col 0: the expansion-port SHT31 */
 static lv_obj_t *s_face;
+static lv_obj_t *s_weather;    /* tileview: weather tile, hub boards only */
 static lv_obj_t *s_settings;
-static lv_obj_t *s_dots[2];
+static lv_obj_t *s_dots[3];
+static int s_page_count = 3;   /* tiles, and page dots to match */
 static lv_obj_t *s_wifi_icon;
 static lv_obj_t *s_ble_icon;
 static lv_obj_t *s_cover;
@@ -117,6 +125,13 @@ static lv_obj_t *s_bar;     /* compact layout's stand-in for the ring */
 static lv_obj_t *s_state_lbl;
 static lv_obj_t *s_name_lbl;    /* this gadget's own name, to tell it from the next one */
 static lv_obj_t *s_power_lbl;
+static lv_obj_t *s_env_lbl;     /* face, top right: latest temperature/humidity */
+static lv_obj_t *s_sensor_temp_cap, *s_sensor_temp, *s_sensor_rh_cap, *s_sensor_rh, *s_sensor_msg;
+static lv_obj_t *s_sensor_extremes, *s_sensor_chart, *s_sensor_legend;
+static lv_chart_series_t *s_chart_temp, *s_chart_rh;
+static lv_obj_t *s_wx_date, *s_wx_clock, *s_wx_cond, *s_wx_temp, *s_wx_range, *s_wx_precip;
+static lv_obj_t *s_wx_in_temp, *s_wx_in_rh, *s_wx_in_note, *s_wx_advice, *s_wx_msg;
+static lv_obj_t *s_wx_day[3], *s_wx_day_rng[3];
 static lv_obj_t *s_caption_lbl;
 static lv_obj_t *s_reply_lbl;   /* full layout: the reply's page while answering */
 static lv_obj_t *s_meter[METER_SEGS];
@@ -146,6 +161,8 @@ static bool s_meter_visible = true;
 static int s_ring_value = -1;
 static uint32_t s_caption_version;
 static float s_next_power_update;
+static float s_next_sensor_update;
+static float s_next_weather_update;
 static float s_next_settings_tick;
 static bool s_dark;
 static int s_brightness = -1;       /* last applied */
@@ -831,6 +848,194 @@ static void on_ring_draw(lv_event_t *e)
     layer->_clip_area = clip;
 }
 
+/* Tapping the big values speaks the current reading. muse_sht31_speak()
+ * is the one call site; in this tree it only logs (see muse_sht31.c for
+ * why), so the tap is harmless until a speech path is connected. */
+static void on_sensor_values_clicked(lv_event_t *e)
+{
+    (void)e;
+    float temp_c, rh;
+    if (!muse_sht31_get(&temp_c, &rh)) {
+        return;   /* nothing valid to say */
+    }
+    char text[64];
+    snprintf(text, sizeof(text), "现在温度 %.1f 度，湿度 %.0f%%", temp_c, rh);
+    muse_sht31_speak(text);
+}
+
+/* The sensor tile: the expansion-port SHT31 (muse_sht31.c) in big type.
+ * The captions are Chinese: muse_font_cjk_16 carries the glyphs (boards
+ * without the CJK font show the values alone). The values themselves are
+ * Montserrat, which has the degree sign the CJK font lacks. update_sensor()
+ * fills the values in and swaps the "no sensor" message for them. Below
+ * the values: the day's temperature extremes, a 24 h chart (temperature
+ * on the left axis, humidity on the right) and its two-word legend. */
+static void build_sensor_tile(lv_obj_t *tile)
+{
+    lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(tile, 4, 0);
+
+    s_sensor_temp_cap = make_label(tile, &lv_font_montserrat_14, COLOR_DIM);
+    lv_label_set_text(s_sensor_temp_cap, "温度");
+    s_sensor_temp = make_label(tile, font_pick(&lv_font_montserrat_28, &lv_font_montserrat_20), COLOR_LIT);
+    s_sensor_rh_cap = make_label(tile, &lv_font_montserrat_14, COLOR_DIM);
+    lv_obj_set_style_pad_top(s_sensor_rh_cap, 8, 0);
+    lv_label_set_text(s_sensor_rh_cap, "湿度");
+    s_sensor_rh = make_label(tile, font_pick(&lv_font_montserrat_28, &lv_font_montserrat_20), COLOR_LIT);
+    /* The big values are the tap target for the spoken reading. */
+    lv_obj_add_flag(s_sensor_temp, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_sensor_temp, on_sensor_values_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(s_sensor_rh, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_sensor_rh, on_sensor_values_clicked, LV_EVENT_CLICKED, NULL);
+
+    s_sensor_extremes = make_label(tile, &lv_font_montserrat_14, COLOR_DIM);
+    lv_label_set_text(s_sensor_extremes, "最高 --° 最低 --°");
+
+    s_sensor_chart = lv_chart_create(tile);
+    lv_obj_set_size(s_sensor_chart, 300, 60);
+    lv_chart_set_type(s_sensor_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_axis_range(s_sensor_chart, LV_CHART_AXIS_PRIMARY_Y, -10, 50);
+    lv_chart_set_axis_range(s_sensor_chart, LV_CHART_AXIS_SECONDARY_Y, 0, 100);
+    lv_chart_set_div_line_count(s_sensor_chart, 3, 5);
+    lv_chart_set_point_count(s_sensor_chart, 1);
+    lv_obj_set_style_bg_color(s_sensor_chart, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_sensor_chart, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_sensor_chart, lv_color_hex(COLOR_DIM), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_sensor_chart, 1, LV_PART_MAIN);
+    lv_obj_set_style_line_width(s_sensor_chart, 2, LV_PART_ITEMS);
+    lv_obj_set_style_size(s_sensor_chart, 0, 0, LV_PART_INDICATOR);   /* lines, no dots */
+    s_chart_temp = lv_chart_add_series(s_sensor_chart, lv_color_hex(COLOR_CHART_TEMP),
+                                       LV_CHART_AXIS_PRIMARY_Y);
+    s_chart_rh = lv_chart_add_series(s_sensor_chart, lv_color_hex(COLOR_CHART_RH),
+                                     LV_CHART_AXIS_SECONDARY_Y);
+
+    /* Legend: the two captions again, in their series colours. */
+    s_sensor_legend = lv_obj_create(tile);
+    lv_obj_remove_style_all(s_sensor_legend);
+    lv_obj_set_size(s_sensor_legend, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_sensor_legend, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(s_sensor_legend, 16, 0);
+    lv_obj_t *legend_temp = make_label(s_sensor_legend, &lv_font_montserrat_14, COLOR_CHART_TEMP);
+    lv_label_set_text(legend_temp, "温度");
+    lv_obj_t *legend_rh = make_label(s_sensor_legend, &lv_font_montserrat_14, COLOR_CHART_RH);
+    lv_label_set_text(legend_rh, "湿度");
+
+    s_sensor_msg = make_label(tile, &lv_font_montserrat_16, COLOR_DIM);
+    lv_label_set_text(s_sensor_msg, "传感器未连接");
+    /* Until the first reading lands, the message is the whole tile. */
+    lv_obj_add_flag(s_sensor_temp_cap, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_sensor_temp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_sensor_rh_cap, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_sensor_rh, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_sensor_extremes, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_sensor_chart, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_sensor_legend, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Indoor comfort in one word, from the reading itself. */
+static const char *comfort_of(float temp_c, float rh)
+{
+    if (rh < 35.0f) {
+        return "偏干";
+    }
+    if (rh > 70.0f) {
+        return "偏潮";
+    }
+    if (temp_c < 18.0f) {
+        return "偏冷";
+    }
+    if (temp_c > 28.0f) {
+        return "偏热";
+    }
+    return "舒适";
+}
+
+/* The weather tile: the hub's forecast on the left, this room's own
+ * SHT31 reading in a card on the right, the next three days along the
+ * bottom and one line of advice. Laid out for the SZP's 320x240 panel
+ * (the only board with the hub); labels are absolute-positioned, the
+ * sensor tile's flex column would not hold the two-column design.
+ * Chinese captions ride the CJK fallback like the sensor tile's.
+ * update_weather() fills everything in. */
+static void build_weather_tile(lv_obj_t *tile)
+{
+    lv_obj_t *city = make_label(tile, &lv_font_montserrat_14, COLOR_LIT);
+    lv_obj_set_pos(city, 10, 6);
+    lv_label_set_text(city, "合肥");
+    s_wx_date = make_label(tile, &lv_font_montserrat_14, COLOR_DIM);
+    lv_obj_set_pos(s_wx_date, 48, 6);
+    s_wx_clock = make_label(tile, &lv_font_montserrat_14, COLOR_LIT);
+    lv_obj_align(s_wx_clock, LV_ALIGN_TOP_RIGHT, -10, 6);
+    lv_label_set_text(s_wx_clock, "--:--");
+
+    s_wx_cond = make_label(tile, &lv_font_montserrat_20, COLOR_LIT);
+    lv_obj_set_pos(s_wx_cond, 12, 32);
+    s_wx_temp = make_label(tile, &lv_font_montserrat_28, COLOR_LIT);
+    lv_obj_set_pos(s_wx_temp, 12, 58);
+    s_wx_range = make_label(tile, &lv_font_montserrat_14, COLOR_DIM);
+    lv_obj_set_pos(s_wx_range, 12, 96);
+    s_wx_precip = make_label(tile, &lv_font_montserrat_14, COLOR_DIM);
+    lv_obj_set_pos(s_wx_precip, 12, 118);
+
+    /* The indoor card. */
+    lv_obj_t *card = lv_obj_create(tile);
+    lv_obj_remove_style_all(card);
+    lv_obj_set_pos(card, 178, 30);
+    lv_obj_set_size(card, 132, 106);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x182234), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(COLOR_DIM), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *in_cap = make_label(card, &lv_font_montserrat_14, 0x48dc96);
+    lv_obj_set_pos(in_cap, 10, 8);
+    lv_label_set_text(in_cap, "室内实测");
+    s_wx_in_temp = make_label(card, &lv_font_montserrat_20, COLOR_LIT);
+    lv_obj_set_pos(s_wx_in_temp, 10, 30);
+    lv_label_set_text(s_wx_in_temp, "--.-°");
+    s_wx_in_rh = make_label(card, &lv_font_montserrat_14, COLOR_DIM);
+    lv_obj_set_pos(s_wx_in_rh, 10, 60);
+    lv_label_set_text(s_wx_in_rh, "湿度 --%");
+    s_wx_in_note = make_label(card, &lv_font_montserrat_14, 0x48dc96);
+    lv_obj_set_pos(s_wx_in_note, 10, 82);
+
+    for (int i = 0; i < 3; i++) {
+        s_wx_day[i] = make_label(tile, &lv_font_montserrat_14, COLOR_LIT);
+        lv_obj_set_pos(s_wx_day[i], 12 + i * 104, 148);
+        s_wx_day_rng[i] = make_label(tile, &lv_font_montserrat_14, COLOR_DIM);
+        lv_obj_set_pos(s_wx_day_rng[i], 12 + i * 104, 170);
+    }
+    s_wx_advice = make_label(tile, &lv_font_montserrat_14, 0xffcf5c);
+    lv_obj_set_pos(s_wx_advice, 12, 204);
+    lv_obj_set_width(s_wx_advice, s_w - 24);
+    lv_label_set_long_mode(s_wx_advice, LV_LABEL_LONG_MODE_CLIP);
+
+    s_wx_msg = make_label(tile, &lv_font_montserrat_16, COLOR_DIM);
+    lv_obj_set_pos(s_wx_msg, 12, 64);
+    lv_label_set_text(s_wx_msg, "天气待更新");
+
+    /* Until the first fetch lands, the message stands in for the
+     * outdoor half; the indoor card is live from the start. */
+    lv_obj_add_flag(s_wx_cond, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_wx_temp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_wx_range, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_wx_precip, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_wx_advice, LV_OBJ_FLAG_HIDDEN);
+    for (int i = 0; i < 3; i++) {
+        lv_obj_add_flag(s_wx_day[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_wx_day_rng[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* Display only, no tap: tapping used to speak the summary
+     * (on_weather_clicked -> muse_sht31_speak), but that tap path is
+     * the prime suspect in the 2026-10-22 weather-tile crash and lost
+     * configuration, so it was removed (ZHH, 2026-10-22). To hear the
+     * weather, ask Muse by voice; the over-temperature alert still
+     * speaks on its own through muse_sht31_speak. */
+}
+
 static void build_screen(void)
 {
     lv_obj_t *scr = lv_screen_active();
@@ -840,12 +1045,29 @@ static void build_screen(void)
 
     lv_obj_t *face = scr;
     if (muse_board->touch) {
-        /* Swipe left from Muse for settings. */
+        /* Three tiles, the face in the middle: swipe right for the side
+         * tile, left for settings. The face stays the default tile. The
+         * side tile is the sensor's on most boards; on hub boards the
+         * weather tile takes its place -- the room's own reading is on
+         * the weather tile, so a separate sensor tile (values, extremes
+         * and chart) would only repeat it. The readings still go to the
+         * hub either way; the face keeps its corner readout. */
         s_tv = lv_tileview_create(scr);
         lv_obj_set_style_bg_color(s_tv, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_tv, LV_OPA_COVER, 0);
         lv_obj_set_scrollbar_mode(s_tv, LV_SCROLLBAR_MODE_OFF);
-        s_face = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
+        if (muse_weather_enabled()) {
+            s_weather = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
+            lv_obj_set_scrollbar_mode(s_weather, LV_SCROLLBAR_MODE_OFF);
+            lv_obj_set_style_bg_color(s_weather, lv_color_black(), 0);
+            lv_obj_set_style_bg_opa(s_weather, LV_OPA_COVER, 0);
+        } else {
+            s_sensor = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
+            lv_obj_set_scrollbar_mode(s_sensor, LV_SCROLLBAR_MODE_OFF);
+            lv_obj_set_style_bg_color(s_sensor, lv_color_black(), 0);
+            lv_obj_set_style_bg_opa(s_sensor, LV_OPA_COVER, 0);
+        }
+        s_face = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_HOR);
         /* It never scrolls, but LVGL would size its scrollbars from all its
          * children every time it draws any part of it. */
         lv_obj_set_scrollbar_mode(s_face, LV_SCROLLBAR_MODE_OFF);
@@ -853,7 +1075,14 @@ static void build_screen(void)
          * shows as a different-coloured square around the character. */
         lv_obj_set_style_bg_color(s_face, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_face, LV_OPA_COVER, 0);
-        s_settings = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_LEFT);
+        s_settings = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_LEFT);
+        lv_tileview_set_tile(s_tv, s_face, LV_ANIM_OFF);
+        if (s_sensor) {
+            build_sensor_tile(s_sensor);
+        }
+        if (s_weather) {
+            build_weather_tile(s_weather);
+        }
         face = s_face;
     }
 
@@ -918,6 +1147,13 @@ static void build_screen(void)
     s_wifi_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
     s_ble_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
     s_power_lbl = make_label(status, &lv_font_unscii_8, COLOR_DIM);
+
+    /* The latest temperature/humidity, in the corner the centred status
+     * line leaves free. Montserrat for the degree sign (the CJK fallback
+     * has none). Empty until muse_sht31 has a reading; update_sensor()
+     * keeps it current. */
+    s_env_lbl = make_label(face, &lv_font_montserrat_14, COLOR_DIM);
+    lv_obj_align(s_env_lbl, LV_ALIGN_TOP_RIGHT, -8, 6);
 
     /* The compact layout leaves the state to the avatar and the caption,
      * unless the screen is tall enough to fit it in small type above Muse. */
@@ -1111,8 +1347,8 @@ static void build_overlays(void)
 {
     lv_obj_t *scr = lv_screen_active();
 
-    /* Page dots. */
-    for (int i = 0; i < 2 && s_tv; i++) {
+    /* Page dots, one per tile. */
+    for (int i = 0; i < s_page_count && s_tv; i++) {
         lv_obj_t *d = lv_obj_create(scr);
         lv_obj_remove_style_all(d);
         lv_obj_set_size(d, 8, 8);
@@ -1120,7 +1356,7 @@ static void build_overlays(void)
         lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(d, lv_color_hex(COLOR_DOT_OFF), 0);
         lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, i ? 8 : -8, -14);
+        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, (2 * i - (s_page_count - 1)) * 8, -14);
         s_dots[i] = d;
     }
 
@@ -1275,21 +1511,26 @@ static void update_chrome(float now)
     s_next_settings_tick = now + SETTINGS_TICK_S;
 
     if (s_tv) {
-        int page = lv_tileview_get_tile_active(s_tv) == s_settings;
+        lv_obj_t *active = lv_tileview_get_tile_active(s_tv);
+        bool on_settings = active == s_settings;
+        int page = (active == s_sensor || active == s_weather) ? 0
+                 : on_settings ? s_page_count - 1 : 1;
         bool subpage = muse_settings_ui_in_subpage();
-        bool swipe = !page || !subpage;
+        bool swipe = !on_settings || !subpage;
         if (swipe != lv_obj_has_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE)) {
             lv_obj_set_flag(s_tv, LV_OBJ_FLAG_SCROLLABLE, swipe);
         }
         int shown = page * 2 + subpage;
         if (shown != s_shown_page) {
-            for (int i = 0; i < 2; i++) {
+            for (int i = 0; i < s_page_count; i++) {
                 lv_obj_set_style_bg_color(s_dots[i], lv_color_hex(i == page ? COLOR_ACCENT : COLOR_DOT_OFF), 0);
-                lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, page && subpage);
+                lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, on_settings && subpage);
             }
             s_shown_page = shown;
         }
-        muse_settings_ui_tick(lv_obj_get_scroll_x(s_tv) > 0);
+        /* Settings counts as on screen once the view scrolls past the face
+         * towards it (the face itself sits at the middle tile's offset). */
+        muse_settings_ui_tick(lv_obj_get_scroll_x(s_tv) > lv_obj_get_x(s_face));
     }
 
     /* Joining, the icon blinks: the compact layout has no state label. */
@@ -1424,6 +1665,229 @@ static void update_power(float now)
     }
     if (strcmp(buf, lv_label_get_text(s_power_lbl)) != 0) {
         lv_label_set_text(s_power_lbl, buf);
+    }
+}
+
+/* The SHT31 readout: the face's corner line and the sensor tile, refreshed
+ * on frame_tick's second. Called before the tile checks there so the sensor
+ * tile stays current while it is the one on screen. A label is only touched
+ * when its text or visibility actually changes. */
+static void update_sensor(float now)
+{
+    if (now < s_next_sensor_update) {
+        return;
+    }
+    s_next_sensor_update = now + 1.0f;
+
+    float temp_c, rh;
+    bool ok = muse_sht31_get(&temp_c, &rh);
+    char buf[24];
+    if (ok) {
+        snprintf(buf, sizeof(buf), "%.1f° %.0f%%", temp_c, rh);
+    } else {
+        buf[0] = '\0';
+    }
+    if (strcmp(buf, lv_label_get_text(s_env_lbl)) != 0) {
+        lv_label_set_text(s_env_lbl, buf);
+    }
+    if (!s_sensor) {
+        return;
+    }
+    static int shown = -1;   /* -1 unknown, 0 no reading, 1 reading */
+    if ((int)ok != shown) {
+        shown = ok;
+        lv_obj_set_flag(s_sensor_msg, LV_OBJ_FLAG_HIDDEN, ok);
+        lv_obj_set_flag(s_sensor_temp_cap, LV_OBJ_FLAG_HIDDEN, !ok);
+        lv_obj_set_flag(s_sensor_temp, LV_OBJ_FLAG_HIDDEN, !ok);
+        lv_obj_set_flag(s_sensor_rh_cap, LV_OBJ_FLAG_HIDDEN, !ok);
+        lv_obj_set_flag(s_sensor_rh, LV_OBJ_FLAG_HIDDEN, !ok);
+        lv_obj_set_flag(s_sensor_extremes, LV_OBJ_FLAG_HIDDEN, !ok);
+        lv_obj_set_flag(s_sensor_legend, LV_OBJ_FLAG_HIDDEN, !ok);
+        if (!ok) {
+            lv_obj_add_flag(s_sensor_chart, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (ok) {
+        snprintf(buf, sizeof(buf), "%.1f°", temp_c);
+        if (strcmp(buf, lv_label_get_text(s_sensor_temp)) != 0) {
+            lv_label_set_text(s_sensor_temp, buf);
+        }
+        snprintf(buf, sizeof(buf), "%.0f%%", rh);
+        if (strcmp(buf, lv_label_get_text(s_sensor_rh)) != 0) {
+            lv_label_set_text(s_sensor_rh, buf);
+        }
+        /* History moves one point per 5 minutes; touch the chart and the
+         * extremes line only when the point count actually changed. */
+        static int shown_hist = -1;
+        int n = muse_sht31_history_count();
+        if (n != shown_hist) {
+            shown_hist = n;
+            float mn, mx;
+            char ebuf[40];   /* the extremes line outgrows buf[24] */
+            if (muse_sht31_history_extremes(&mn, &mx, NULL, NULL, NULL)) {
+                snprintf(ebuf, sizeof(ebuf), "最高 %.1f° 最低 %.1f°", mx, mn);
+            } else {
+                snprintf(ebuf, sizeof(ebuf), "最高 --° 最低 --°");
+            }
+            if (strcmp(ebuf, lv_label_get_text(s_sensor_extremes)) != 0) {
+                lv_label_set_text(s_sensor_extremes, ebuf);
+            }
+            lv_obj_set_flag(s_sensor_chart, LV_OBJ_FLAG_HIDDEN, n < 2);
+            if (n >= 2) {
+                lv_chart_set_point_count(s_sensor_chart, n);
+                float tlo = 1e9f, thi = -1e9f, hlo = 1e9f, hhi = -1e9f;
+                for (int i = 0; i < n; i++) {
+                    float pt, pr;
+                    if (muse_sht31_history_point(i, &pt, &pr, NULL, NULL)) {
+                        /* Feed x10: whole-degree values threw away the
+                         * sub-degree shape before it ever reached the chart. */
+                        lv_chart_set_value_by_id(s_sensor_chart, s_chart_temp, i,
+                                                 (int32_t)lroundf(pt * 10.0f));
+                        lv_chart_set_value_by_id(s_sensor_chart, s_chart_rh, i,
+                                                 (int32_t)lroundf(pr * 10.0f));
+                        if (pt < tlo) tlo = pt;
+                        if (pt > thi) thi = pt;
+                        if (pr < hlo) hlo = pr;
+                        if (pr > hhi) hhi = pr;
+                    }
+                }
+                if (thi > -1e8f) {
+                    /* Auto-scale each axis to the data it holds. The
+                     * phase-2 fixed ranges (-10..50 C, 0..100 %RH)
+                     * flattened a whole night's 3-degree swing into
+                     * ~3 px of a 60 px chart. Ranges are x10 like the
+                     * values; the minimum span keeps a genuinely flat
+                     * night from blowing sensor noise up into mountains. */
+                    int32_t t_lo = (int32_t)floorf((tlo - 0.5f) * 10.0f);
+                    int32_t t_hi = (int32_t)ceilf((thi + 0.5f) * 10.0f);
+                    if (t_hi - t_lo < 30) {
+                        int32_t mid = (t_lo + t_hi) / 2;
+                        t_lo = mid - 15;
+                        t_hi = mid + 15;
+                    }
+                    int32_t h_lo = (int32_t)floorf((hlo - 3.0f) * 10.0f);
+                    int32_t h_hi = (int32_t)ceilf((hhi + 3.0f) * 10.0f);
+                    if (h_hi - h_lo < 100) {
+                        int32_t mid = (h_lo + h_hi) / 2;
+                        h_lo = mid - 50;
+                        h_hi = mid + 50;
+                    }
+                    lv_chart_set_axis_range(s_sensor_chart, LV_CHART_AXIS_PRIMARY_Y,
+                                            t_lo, t_hi);
+                    lv_chart_set_axis_range(s_sensor_chart, LV_CHART_AXIS_SECONDARY_Y,
+                                            h_lo, h_hi);
+                }
+                lv_chart_refresh(s_sensor_chart);
+            }
+        }
+    }
+}
+
+static void wx_set_text(lv_obj_t *lbl, const char *text)
+{
+    if (lbl && strcmp(lv_label_get_text(lbl), text) != 0) {
+        lv_label_set_text(lbl, text);
+    }
+}
+
+/* The weather tile's refresh, on frame_tick's second like
+ * update_sensor(). Outdoor fields move only when a new fetch lands
+ * (version bump); the clock, the date and the indoor card track every
+ * pass. Nothing here runs when the tile was never built. */
+static void update_weather(float now)
+{
+    if (!s_weather) {
+        return;
+    }
+    if (now < s_next_weather_update) {
+        return;
+    }
+    s_next_weather_update = now + 1.0f;
+
+    muse_weather_t w;
+    bool ok = muse_weather_get(&w);
+    static int shown_valid = -1;   /* -1 unknown, 0 no data, 1 data */
+    if ((int)ok != shown_valid) {
+        shown_valid = ok;
+        lv_obj_set_flag(s_wx_msg, LV_OBJ_FLAG_HIDDEN, ok);
+        lv_obj_set_flag(s_wx_cond, LV_OBJ_FLAG_HIDDEN, !ok);
+        lv_obj_set_flag(s_wx_temp, LV_OBJ_FLAG_HIDDEN, !ok);
+        lv_obj_set_flag(s_wx_range, LV_OBJ_FLAG_HIDDEN, !ok);
+        lv_obj_set_flag(s_wx_precip, LV_OBJ_FLAG_HIDDEN, !ok);
+        lv_obj_set_flag(s_wx_advice, LV_OBJ_FLAG_HIDDEN, !ok);
+        for (int i = 0; i < 3; i++) {
+            lv_obj_set_flag(s_wx_day[i], LV_OBJ_FLAG_HIDDEN, !ok);
+            lv_obj_set_flag(s_wx_day_rng[i], LV_OBJ_FLAG_HIDDEN, !ok);
+        }
+    }
+    char buf[64];
+    if (ok) {
+        static uint32_t shown_ver = 0;
+        if (w.version != shown_ver) {
+            shown_ver = w.version;
+            wx_set_text(s_wx_cond, w.cond);
+            snprintf(buf, sizeof(buf), "%.1f°", (double)w.temp);
+            wx_set_text(s_wx_temp, buf);
+            snprintf(buf, sizeof(buf), "今日 %d~%d°", w.lo, w.hi);
+            wx_set_text(s_wx_range, buf);
+            if (w.precip >= 0) {
+                snprintf(buf, sizeof(buf), "降水概率 %d%%", w.precip);
+            } else {
+                buf[0] = '\0';
+            }
+            wx_set_text(s_wx_precip, buf);
+            for (int i = 0; i < 3; i++) {
+                if (w.days[i].name[0]) {
+                    snprintf(buf, sizeof(buf), "%s %s",
+                             w.days[i].name, w.days[i].cond);
+                } else {
+                    buf[0] = '\0';
+                }
+                wx_set_text(s_wx_day[i], buf);
+                if (w.days[i].name[0]) {
+                    snprintf(buf, sizeof(buf), "%d~%d°",
+                             w.days[i].lo, w.days[i].hi);
+                    if (w.days[i].precip >= 30) {
+                        size_t len = strlen(buf);
+                        snprintf(buf + len, sizeof(buf) - len, " 雨%d%%",
+                                 w.days[i].precip);
+                    }
+                } else {
+                    buf[0] = '\0';
+                }
+                wx_set_text(s_wx_day_rng[i], buf);
+            }
+            wx_set_text(s_wx_advice, w.advice);
+        }
+    }
+
+    /* Clock and date: real ones only once the hub has set the clock;
+     * before that time() is seconds since boot and both stay blank. */
+    time_t tnow = time(NULL);
+    if (tnow > 1704067200) {
+        struct tm tmv;
+        localtime_r(&tnow, &tmv);
+        snprintf(buf, sizeof(buf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+        wx_set_text(s_wx_clock, buf);
+        static const char *const wk[] = {
+            "周日", "周一", "周二", "周三", "周四", "周五", "周六",
+        };
+        snprintf(buf, sizeof(buf), "%d月%d日 %s",
+                 tmv.tm_mon + 1, tmv.tm_mday, wk[tmv.tm_wday]);
+        wx_set_text(s_wx_date, buf);
+    }
+
+    float temp_c, rh;
+    if (muse_sht31_get(&temp_c, &rh)) {
+        snprintf(buf, sizeof(buf), "%.1f°", (double)temp_c);
+        wx_set_text(s_wx_in_temp, buf);
+        snprintf(buf, sizeof(buf), "湿度 %.0f%%", (double)rh);
+        wx_set_text(s_wx_in_rh, buf);
+        wx_set_text(s_wx_in_note, comfort_of(temp_c, rh));
+    } else {
+        wx_set_text(s_wx_in_temp, "--.-°");
+        wx_set_text(s_wx_in_rh, "湿度 --%");
+        wx_set_text(s_wx_in_note, "");
     }
 }
 
@@ -1614,6 +2078,8 @@ static void frame_tick(lv_timer_t *timer)
         return;
     }
     update_chrome(now);
+    update_sensor(now);
+    update_weather(now);
     if (muse_menu_tick(now)) {
         image_hide_locked();
         return;   /* the menu covers the face */
@@ -1621,9 +2087,9 @@ static void frame_tick(lv_timer_t *timer)
     if (s_image_dsc.data) {
         return;   /* the image covers the face */
     }
-    if (s_tv && lv_obj_get_scroll_x(s_tv) != 0) {
-        /* Off screen, or sliding to or from settings: hold still so the
-         * slide gets the whole frame time. */
+    if (s_tv && lv_obj_get_scroll_x(s_tv) != lv_obj_get_x(s_face)) {
+        /* Not on the face tile, or sliding between tiles: hold still so
+         * the slide gets the whole frame time. */
         return;
     }
 

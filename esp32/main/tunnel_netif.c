@@ -295,9 +295,13 @@ bool tunnel_netif_start(const ip4_addr_t *ip,
         tx_item_t *p = &s_tx_slots[i];
         xQueueSend(s_tx_free_queue, &p, 0);
     }
+    // PSRAM stack (Lichuang SZP): by the time the tunnel starts, the
+    // internal heap's largest block is ~4 KB, so a plain xTaskCreate for
+    // this 4 KB stack (plus TCB) fails and the tunnel never comes up.
     if (!s_tx_task
-        && xTaskCreate(tx_task, "tun_tx", TX_TASK_STACK, NULL, TX_TASK_PRIO,
-                       &s_tx_task) != pdPASS) {
+        && xTaskCreatePinnedToCoreWithCaps(tx_task, "tun_tx", TX_TASK_STACK, NULL,
+                                            TX_TASK_PRIO, &s_tx_task, tskNO_AFFINITY,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate failed");
         return false;
     }
