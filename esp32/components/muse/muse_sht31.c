@@ -22,17 +22,15 @@
 #include <sys/stat.h>
 #include <time.h>
 
-#include "driver/sdmmc_host.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "minimp3.h"
 #include "muse_audio.h"
+#include "muse_sd.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "sdmmc_cmd.h"
 
 static const char *TAG = "sht31";
 
@@ -61,18 +59,15 @@ static const char *TAG = "sht31";
 #define SHT31_ALERT_COOLDOWN_US   (30LL * 60 * 1000 * 1000)
 
 /*
- * SD log: the board's TF slot in 1-bit SD mode. One CSV per local day in
- * /sdcard/sht31, one row per sample. Local time is a fixed UTC offset
- * (the board lives in China, no DST); the firmware has no clock source,
- * so until something sets the time the log falls back to one no-time.csv
- * whose timestamps are seconds since boot (the header says so).
+ * SD log: the board's TF slot, mounted by muse_sd (the camera writes photos to
+ * the same card). One CSV per local day in /sdcard/sht31, one row per sample.
+ * Local time is a fixed UTC offset (the board lives in China, no DST); the
+ * firmware has no clock source, so until something sets the time the log falls
+ * back to one no-time.csv whose timestamps are seconds since boot (the header
+ * says so).
  */
-#define SHT31_SD_MOUNT_POINT   "/sdcard"
-#define SHT31_SD_DIR           "/sdcard/sht31"
+#define SHT31_SD_DIR           MUSE_SD_MOUNT_POINT "/sht31"
 #define SHT31_SD_RETRY_US      (10LL * 60 * 1000 * 1000)
-#define SHT31_SD_CLK_GPIO      GPIO_NUM_47
-#define SHT31_SD_CMD_GPIO      GPIO_NUM_48
-#define SHT31_SD_D0_GPIO       GPIO_NUM_21
 #define SHT31_LOCAL_UTC_OFFSET_S (8 * 3600)
 /* time() past this (2024-01-01 UTC) is a wall clock, not uptime. */
 #define SHT31_WALL_EPOCH_MIN   1704067200
@@ -105,7 +100,6 @@ static bool s_alert_high_armed = true, s_alert_low_armed = true;
 static int64_t s_alert_high_last_us, s_alert_low_last_us;   /* 0 = never */
 
 /* SD state: mounted once by the sampler; retries on a slow cadence. */
-static sdmmc_card_t *s_sd_card;
 static bool s_sd_mounted;
 static int64_t s_sd_next_try_us;
 
@@ -424,23 +418,8 @@ static void sht31_check_alerts(float temp_c)
 
 static bool sht31_sd_mount(void)
 {
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.slot = SDMMC_HOST_SLOT_1;
-    sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
-    slot.width = 1;
-    slot.clk = SHT31_SD_CLK_GPIO;
-    slot.cmd = SHT31_SD_CMD_GPIO;
-    slot.d0 = SHT31_SD_D0_GPIO;
-    slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-    esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {
-        .format_if_mount_failed = false,
-        .max_files = 2,
-        .allocation_unit_size = 16 * 1024,
-    };
-    esp_err_t err = esp_vfs_fat_sdmmc_mount(SHT31_SD_MOUNT_POINT, &host, &slot,
-                                            &mount_cfg, &s_sd_card);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SD mount failed: %s", esp_err_to_name(err));
+    /* The card is shared with the camera's photos; muse_sd owns the mount. */
+    if (muse_sd_mount() != ESP_OK) {
         return false;
     }
     mkdir(SHT31_SD_DIR, 0775);
@@ -450,11 +429,8 @@ static bool sht31_sd_mount(void)
 
 static void sht31_sd_unmount(void)
 {
-    if (s_sd_mounted) {
-        esp_vfs_fat_sdcard_unmount(SHT31_SD_MOUNT_POINT, s_sd_card);
-        s_sd_card = NULL;
-        s_sd_mounted = false;
-    }
+    muse_sd_unmount();
+    s_sd_mounted = false;
 }
 
 /* "Local" broken-down time for a wall stamp: fixed offset, no TZ games. */
@@ -481,7 +457,7 @@ static void sht31_sd_log(float temp_c, float rh, int64_t ts, bool wall)
         }
     }
 
-    char path[64], stamp[32];
+    char path[64], stamp[96];
     if (wall) {
         struct tm tmv;
         sht31_local_tm(ts, &tmv);

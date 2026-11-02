@@ -24,6 +24,7 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #if CONFIG_PM_ENABLE
@@ -47,6 +48,9 @@
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
 #endif
+#if CONFIG_MUSE_LICHUANG_CAMERA
+#include "boards/lichuang_cam_mode.h"
+#endif
 
 static const char *TAG = "muse_input";
 
@@ -67,6 +71,15 @@ static const char *TAG = "muse_input";
 #define SERIAL_RX 1024         /* the driver drops what doesn't fit, so a console line must */
 #define SERIAL_LINE 1024
 #define CHAT_MAX (192 * 1024)  /* a typed message, assembled from "chat+=" lines */
+
+#if CONFIG_MUSE_LICHUANG_CAMERA
+/* Two taps enter camera mode: the second PRESS must come within 600 ms of the
+ * first, and the first must have been short (under 400 ms, so it was a tap and
+ * not a held note). The second press is the camera's; the first already went
+ * to the voice pipeline as the tap it was (see talk_button). */
+#define CAM_DOUBLE_US 600000
+#define CAM_TAP_MAX_US 400000
+#endif
 
 static QueueHandle_t s_queue;
 static TaskHandle_t s_input;
@@ -114,6 +127,11 @@ static void power_off(void)
 
 static void set_asleep(bool asleep, const char *why)
 {
+#if CONFIG_MUSE_LICHUANG_CAMERA
+    if (asleep && lichuang_cam_mode_active()) {
+        return;   /* the viewfinder keeps the screen: leaving the mode does */
+    }
+#endif
     if (asleep != muse_state_asleep()) {
         ESP_LOGI(TAG, "%s (%s)", asleep ? "sleeping" : "waking", why);
         muse_state_set_asleep(asleep);
@@ -214,6 +232,47 @@ static void aux_key(bool pressed, bool edge)
     }
 }
 
+#if CONFIG_MUSE_LICHUANG_CAMERA
+/*
+ * The talk key's second role: two quick taps open the camera. The edges come
+ * in here first, so the window is measured on press edges before anything else
+ * looks at them; the press that completes the gesture is consumed and never
+ * reaches the voice pipeline, while the first tap already behaved exactly as
+ * it does on any other board (posted as PTT, and cancelled by the voice loop
+ * for being too short to be a note).
+ *
+ * True when the edge was the camera's.
+ */
+static bool cam_double_click(unsigned ev)
+{
+    static int64_t first_down_us;
+    static int64_t tap_up_us;
+    const int64_t now = esp_timer_get_time();
+    const bool pressed = (ev & MUSE_BTN_TALK_PRESS) != 0;
+    const bool released = (ev & MUSE_BTN_TALK_RELEASE) != 0;
+
+    if (pressed && tap_up_us && now - first_down_us <= CAM_DOUBLE_US) {
+        ESP_LOGI(TAG, "talk double-tap: camera mode");
+        tap_up_us = 0;
+        first_down_us = 0;
+        if (!lichuang_cam_mode_enter()) {
+            muse_state_set_caption("%s", "CAMERA UNAVAILABLE");
+        }
+        return true;
+    }
+    if (pressed) {
+        first_down_us = now;
+        tap_up_us = 0;
+    }
+    if (released && first_down_us && now - first_down_us < CAM_TAP_MAX_US) {
+        tap_up_us = now;
+    } else if (released) {
+        tap_up_us = 0;   /* held: not half of a double tap */
+    }
+    return false;
+}
+#endif
+
 /* Talk button: push-to-talk, or Select while the menu is open. Asleep, the
  * press wakes and is posted as a waking one: muse_voice records only if it's
  * still held once awake. */
@@ -221,6 +280,18 @@ static void talk_button(unsigned ev)
 {
     bool talk_down = s_talk_down;
     static bool swallow;
+#if CONFIG_MUSE_LICHUANG_CAMERA
+    if (lichuang_cam_mode_active()) {
+        /* The camera owns the key: short press takes a photo, a long hold
+         * leaves (muse_input's loop watches the hold). */
+        if (ev & MUSE_BTN_TALK_PRESS) lichuang_cam_mode_key(true);
+        if (ev & MUSE_BTN_TALK_RELEASE) lichuang_cam_mode_key(false);
+        return;
+    }
+    if (!muse_state_asleep() && !muse_menu_is_open() && cam_double_click(ev)) {
+        return;   /* the camera took this press */
+    }
+#endif
 #if CONFIG_MUSE_WATCHER_CAMERA
     static TickType_t last_release;
     if ((ev & MUSE_BTN_TALK_PRESS) && !muse_state_asleep()
@@ -306,6 +377,11 @@ static void keyboard_buttons(unsigned ev)
 /* A pairing prompt wakes the screen and keeps it on; otherwise idle sleeps. */
 static void check_sleep(void)
 {
+#if CONFIG_MUSE_LICHUANG_CAMERA
+    if (lichuang_cam_mode_active()) {
+        return;   /* the viewfinder is what keeps the screen on */
+    }
+#endif
     muse_ble_status_t ble;
     muse_ble_status(&ble);
     bool prompt = ble.passkey || muse_link_state() == MUSE_LINK_CONFIRM;
@@ -461,6 +537,13 @@ static void input_task(void *arg)
                      ev & MUSE_BTN_TALK_RELEASE ? " release" : "");
             talk_button(ev);
         }
+#if CONFIG_MUSE_LICHUANG_CAMERA
+        /* A hold in camera mode leaves at 800 ms, without waiting for the
+         * release; this is the only place the button level is polled. */
+        if (lichuang_cam_mode_active()) {
+            lichuang_cam_mode_tick();
+        }
+#endif
         keyboard_buttons(ev);
         dedicated_buttons(ev);
         /* A latched key (the 1.75's PMU) can report press and release in the

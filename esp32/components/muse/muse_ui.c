@@ -51,6 +51,10 @@
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
 #endif
+#if CONFIG_MUSE_LICHUANG_CAMERA
+#include "boards/lichuang_camera.h"
+#include "boards/lichuang_cam_mode.h"
+#endif
 
 static const char *TAG = "muse_ui";
 
@@ -141,6 +145,9 @@ static lv_obj_t *s_aux_icon;
 static lv_obj_t *s_image;   /* display.draw_url, over the face */
 #if CONFIG_MUSE_WATCHER_CAMERA
 static lv_obj_t *s_camera_hint;
+#endif
+#if CONFIG_MUSE_LICHUANG_CAMERA
+static lv_obj_t *s_cam_status;   /* camera mode's one-line status, over the image */
 #endif
 static lv_image_dsc_t s_image_dsc;  /* its data is set once the image is shown */
 /* The download writes the pixels without the display lock, so a big JPEG isn't
@@ -1283,9 +1290,20 @@ static void image_sync(void)
 static void on_image_clicked(lv_event_t *e)
 {
     (void)e;
+#if CONFIG_MUSE_LICHUANG_CAMERA
+    if (lichuang_cam_mode_active()) {
+        return;   /* the viewfinder owns the screen; the talk key is the shutter */
+    }
+#endif
 #if CONFIG_MUSE_WATCHER_CAMERA
     if (watcher_camera_preview_active()) {
         watcher_camera_preview_toggle();
+        return;
+    }
+#endif
+#if CONFIG_MUSE_LICHUANG_CAMERA
+    if (lichuang_camera_preview_active()) {
+        lichuang_camera_preview_toggle();
         return;
     }
 #endif
@@ -1297,6 +1315,13 @@ static void on_camera_hint_clicked(lv_event_t *e)
 {
     (void)e;
     if (watcher_camera_preview_active()) watcher_camera_preview_toggle();
+}
+#endif
+#if CONFIG_MUSE_LICHUANG_CAMERA
+static void on_lichuang_camera_hint_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (lichuang_camera_preview_active()) lichuang_camera_preview_toggle();
 }
 #endif
 
@@ -1366,6 +1391,22 @@ static void build_overlays(void)
     lv_obj_set_pos(s_image, 0, 0);
     lv_obj_add_flag(s_image, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(s_image, on_image_clicked, LV_EVENT_CLICKED, NULL);
+#if CONFIG_MUSE_LICHUANG_CAMERA
+    /* Camera mode's status: the image covers the face's caption, so this sits
+     * above it, as the Watcher's hint button does. */
+    s_cam_status = lv_label_create(scr);
+    lv_label_set_text(s_cam_status, "");
+    lv_obj_set_style_text_font(s_cam_status, font_pick(&lv_font_montserrat_20, FONT_COMPACT), 0);
+    lv_obj_set_style_text_color(s_cam_status, lv_color_hex(COLOR_LIT), 0);
+    lv_obj_set_style_bg_color(s_cam_status, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cam_status, LV_OPA_70, 0);
+    lv_obj_set_style_pad_hor(s_cam_status, 10, 0);
+    lv_obj_set_style_pad_ver(s_cam_status, 6, 0);
+    lv_obj_set_style_radius(s_cam_status, 10, 0);
+    lv_obj_align(s_cam_status, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_remove_flag(s_cam_status, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_cam_status, LV_OBJ_FLAG_HIDDEN);
+#endif
 #if CONFIG_MUSE_WATCHER_CAMERA
     s_camera_hint = lv_btn_create(scr);
     lv_obj_set_size(s_camera_hint, 244, 46);
@@ -2257,6 +2298,22 @@ void muse_ui_camera_hint(bool visible)
     muse_board->display_lock(-1);
     if (visible) lv_obj_remove_flag(s_camera_hint, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(s_camera_hint, LV_OBJ_FLAG_HIDDEN);
+    muse_board->display_unlock();
+}
+#endif
+
+#if CONFIG_MUSE_LICHUANG_CAMERA
+void muse_ui_cam_status(const char *text)
+{
+    if (!s_ready || !s_cam_status) return;
+    muse_board->display_lock(-1);
+    if (text && text[0]) {
+        lv_label_set_text(s_cam_status, text);
+        lv_obj_remove_flag(s_cam_status, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_cam_status, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_cam_status, "");
+    }
     muse_board->display_unlock();
 }
 #endif

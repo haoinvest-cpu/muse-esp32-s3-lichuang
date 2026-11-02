@@ -54,6 +54,11 @@ bool muse_ui_image_draw(int x, int y, int w, int h, const uint16_t *pixels);
 void muse_ui_image_hide(void);
 /* Watcher camera mode: shows an on-screen shutter hint over the live image. */
 void muse_ui_camera_hint(bool visible);
+#if CONFIG_MUSE_LICHUANG_CAMERA
+/* Camera mode's status line over the live image ("NO SD CARD", "SAVED ...");
+ * empty or NULL hides it. From any task. */
+void muse_ui_cam_status(const char *text);
+#endif
 
 /* Bench testing, from any task: streams the screen over USB serial. */
 void muse_ui_request_snapshot(void);

@@ -157,6 +157,18 @@ menu "Muse"
             memory and preview decoding shares CPU time with voice and Link.
             Leave disabled to build without camera support.
 
+    config MUSE_LICHUANG_CAMERA
+        bool "Lichuang SZP gc0308 camera capture and live preview"
+        depends on MUSE_BOARD_LICHUANG_SZP && SPIRAM
+        default n
+        help
+            Enable the camera.capture Home Link command and the on-screen
+            camera preview for the Lichuang SZP ESP32-S3's gc0308 camera.
+            The sensor is powered via the PCA9557 I/O expander only while
+            capturing or previewing. Camera buffers and tasks consume memory
+            and preview decoding shares CPU time with voice and Link.
+            Leave disabled to build without camera support.
+
     config MUSE_DEFAULT_CHINESE
         bool "Default UI language to Simplified Chinese"
         depends on MUSE_CJK_FONT

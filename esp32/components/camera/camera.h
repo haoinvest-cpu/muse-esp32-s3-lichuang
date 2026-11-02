@@ -37,6 +37,11 @@ typedef struct {
     const uint8_t *jpeg;
     size_t len;
     int width, height;
+    /* Optional delivery thumbnail: a small JPEG of the same frame, for
+     * chats that cannot restore the full image's base64 reliably. NULL
+     * when the backend makes none. Owned like jpeg; release() frees it. */
+    const uint8_t *thumb;
+    size_t thumb_len;
     void *priv;               /* the backend's, for release */
 } camera_frame_t;
 

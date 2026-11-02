@@ -70,6 +70,9 @@ static const char *TAG = "muse_voice";
 #define ACK_WAIT_US (30LL * 1000000)            /* asleep, waiting for the VM to have a note */
 
 static QueueHandle_t s_queue;
+static TaskHandle_t s_task;            /* the turn loop, once it runs */
+static volatile bool s_suspend_req;    /* camera mode wants the device */
+static volatile bool s_suspended;      /* ... and the loop has parked */
 static volatile bool s_monitor;
 static volatile float s_monitor_db = -100.0f;
 static volatile bool s_chirp;
@@ -286,6 +289,9 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
     bool released = false;
     size_t stop_at = MAX_FRAMES;
     while (n + MUSE_AUDIO_CHUNK <= stop_at) {
+        if (s_suspend_req) {
+            break;   /* the camera has the screen: the note stops here */
+        }
         if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
             break;
         }
@@ -365,6 +371,12 @@ static bool hatch_reply(bool *delivered)
     int64_t t0 = esp_timer_get_time();
     *delivered = false;
     for (;;) {
+        if (s_suspend_req) {
+            /* The camera took the screen: stop talking and forget the reply. */
+            muse_hatch_turn_cancel();
+            muse_state_set_level(0);
+            return false;
+        }
         muse_hatch_ev_t ev;
         while ((ev = muse_hatch_turn_event(text, sizeof(text))) != MUSE_HATCH_EV_NONE) {
             switch (ev) {
@@ -797,8 +809,35 @@ static bool can_record(void)
 static void voice_task(void *arg)
 {
     bool pending_down = false;
+    s_task = xTaskGetCurrentTaskHandle();
     muse_audio_selftest();
     for (;;) {
+        if (s_suspend_req) {
+            if (!s_suspended) {
+                /* Camera mode: no mic reads, no Hatch requests. A turn that was
+                 * live when it asked is dropped, as a release would end it. */
+                muse_hatch_turn_cancel();
+                drop_rec();
+                pre_reset();
+                muse_state_set_level(0);
+                muse_state_set_progress(0);
+                muse_state_set_mode(MUSE_MODE_IDLE);
+                muse_state_set_caption("%s", "");
+                pending_down = false;
+                muse_input_event_t stale;
+                while (xQueueReceive(s_queue, &stale, 0) == pdTRUE) {
+                }
+                s_suspended = true;
+                ESP_LOGI(TAG, "parked for camera mode");
+            }
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+        if (s_suspended) {
+            s_suspended = false;
+            pre_reset();   /* nothing played: but the mic's old samples are stale */
+            ESP_LOGI(TAG, "back from camera mode");
+        }
         bool wake = false;
         if (!pending_down) {
             muse_input_event_t ev;
@@ -874,6 +913,12 @@ static void voice_task(void *arg)
         char why[96];
         bool ok = record(pending_down, &held, why, sizeof(why));
         pending_down = false;
+        if (s_suspend_req) {
+            muse_hatch_turn_cancel();
+            drop_rec();
+            pre_reset();
+            continue;
+        }
         if (held < MIN_HELD_FRAMES && !wake) {
             muse_hatch_turn_cancel();
             drop_rec();
@@ -910,6 +955,31 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+void muse_voice_suspend(void)
+{
+    s_suspend_req = true;
+    if (!s_task) {
+        /* No loop (audio failed): there is nothing to park, and nothing that
+         * would ever report it. */
+        s_suspended = true;
+        return;
+    }
+    muse_state_nudge();   /* out of the resting wait, if it's in one */
+}
+
+void muse_voice_resume(void)
+{
+    s_suspend_req = false;
+    if (s_task) {
+        xTaskNotifyGive(s_task);
+    }
+}
+
+bool muse_voice_suspended(void)
+{
+    return s_suspended;
 }
 
 void muse_voice_set_monitor(bool on)

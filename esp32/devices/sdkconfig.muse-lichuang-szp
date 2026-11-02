@@ -52,6 +52,7 @@ CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
 CONFIG_HOMEHUB_OTA_ENABLED=n
 CONFIG_HOMEHUB_NVS_ENCRYPTION=n
 CONFIG_MUSE_CJK_FONT=y
+CONFIG_MUSE_LICHUANG_CAMERA=y
 
 # Voice wake W1 (esp-sr "ESP Speech Recognition" menu): pack the
 # WakeNet9s "Hi, ESP" wake word and the VADNet1 VAD model into
@@ -64,3 +65,9 @@ CONFIG_MUSE_CJK_FONT=y
 CONFIG_SR_WN_WN9S_HIESP=y
 CONFIG_SR_VADN_VADNET1_MEDIUM=y
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+
+# Camera DMA buffer cap: the stock 32768 lets cam_hal ask for a 30720-byte
+# contiguous internal block; this firmwares steady-state largest block is
+# 26624, so every camera init failed (2026-11-02, both capture paths).
+# 16384 fits with room and just costs a few more DMA nodes.
+CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=16384
