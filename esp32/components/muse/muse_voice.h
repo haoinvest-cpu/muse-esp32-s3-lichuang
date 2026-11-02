@@ -50,3 +50,19 @@ bool muse_voice_resting(void);
 /* Voice notes recorded out of Hatch's reach wait to go, the oldest from the
  * last half hour: worth keeping Wi-Fi up for. */
 bool muse_voice_notes_waiting(void);
+
+/*
+ * Camera mode's hand-off: the loop stops reading the mic, stops asking Hatch
+ * for anything and parks, cancelling a turn that was live when the camera
+ * asked (a half-said note is dropped, as if the button were let go). The
+ * key that starts the mode is a tap, so what's usually cancelled is a tap's
+ * worth of audio the pipeline was already throwing away.
+ *
+ * suspend() is asynchronous: muse_voice_suspended() turns true once the loop
+ * has parked. resume() wakes it; the pre-roll starts empty, like any wake.
+ * Both are no-ops before muse_voice_start() or after it failed, and both are
+ * safe to call from any task.
+ */
+void muse_voice_suspend(void);
+void muse_voice_resume(void);
+bool muse_voice_suspended(void);

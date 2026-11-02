@@ -30,7 +30,7 @@
 #include "cJSON.h"
 
 #include "esp_heap_caps.h"
-#if CONFIG_MUSE_WATCHER_CAMERA
+#if CONFIG_MUSE_WATCHER_CAMERA || CONFIG_MUSE_LICHUANG_CAMERA
 #include "freertos/idf_additions.h"
 #endif
 #include "esp_timer.h"
@@ -76,6 +76,9 @@
 #endif
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
+#endif
+#if CONFIG_MUSE_LICHUANG_CAMERA
+#include "boards/lichuang_camera.h"
 #endif
 #if CONFIG_MUSE_ENABLED
 #include "muse_glue.h"
@@ -1579,29 +1582,98 @@ static void draw_url_done(const image_fetch_result_t *r, void *user) {
 }
 #endif
 
-#if CONFIG_MUSE_WATCHER_CAMERA
+#if CONFIG_MUSE_WATCHER_CAMERA || CONFIG_MUSE_LICHUANG_CAMERA
 typedef struct {
     noise_ctrl_session_generation_t session_generation;
     char request_id[64];
-} watcher_camera_task_args_t;
+} camera_capture_task_args_t;
 
-static void watcher_camera_capture_task(void *arg) {
-    watcher_camera_task_args_t *args = arg;
+static void camera_capture_task(void *arg) {
+    camera_capture_task_args_t *args = arg;
     char *image = NULL;
+#if CONFIG_MUSE_LICHUANG_CAMERA
+    char *thumb = NULL;
+#endif
     const char *error = NULL;
     cJSON *result = cJSON_CreateObject();
+#if CONFIG_MUSE_WATCHER_CAMERA
     bool ok = watcher_camera_capture(&image, &error);
+#else
+    bool ok = lichuang_camera_capture(&image, &thumb, &error);
+#endif
     cJSON_AddBoolToObject(result, "ok", ok);
     if (ok) {
         cJSON *payload = cJSON_AddObjectToObject(result, "payload");
         cJSON_AddStringToObject(payload, "format", "jpeg-base64");
         cJSON_AddStringToObject(payload, "data_base64", image);
+#if CONFIG_MUSE_LICHUANG_CAMERA
+        if (thumb) {
+            cJSON_AddStringToObject(payload, "thumb_format", "jpeg-base64-320x240");
+            cJSON_AddStringToObject(payload, "thumb_base64", thumb);
+        }
+#endif
     } else {
         cJSON *failure = cJSON_AddObjectToObject(result, "error");
         cJSON_AddStringToObject(failure, "code", "camera_capture_failed");
         cJSON_AddStringToObject(failure, "message", error ? error : "camera capture failed");
     }
     free(image);
+#if CONFIG_MUSE_LICHUANG_CAMERA
+    free(thumb);
+#endif
+    noise_ctrl_send_command_result(args->session_generation, args->request_id, result);
+    free(args);
+    stack_monitor_record(NULL);
+    vTaskDeleteWithCaps(NULL);
+}
+#endif
+
+#if CONFIG_MUSE_LICHUANG_CAMERA
+// camera.saved_list and camera.fetch: reading the SD card can be slow (a
+// missing card runs the SD init timeouts), so each runs on its own PSRAM task
+// and answers asynchronously, like camera.capture above.
+typedef struct {
+    noise_ctrl_session_generation_t session_generation;
+    char request_id[64];
+    char name[32];   // empty: camera.saved_list
+} camera_card_task_args_t;
+
+static void camera_card_task(void *arg) {
+    camera_card_task_args_t *args = arg;
+    cJSON *result = NULL;
+    if (args->name[0]) {
+        char *image = NULL;
+        const char *error = NULL;
+        bool ok = lichuang_camera_fetch(args->name, &image, &error);
+        result = cJSON_CreateObject();
+        if (result) {
+            cJSON_AddBoolToObject(result, "ok", ok);
+            if (ok) {
+                cJSON *payload = cJSON_AddObjectToObject(result, "payload");
+                if (payload) {
+                    cJSON_AddStringToObject(payload, "format", "jpeg-base64");
+                    cJSON_AddStringToObject(payload, "data_base64", image);
+                }
+            } else {
+                cJSON *failure = cJSON_AddObjectToObject(result, "error");
+                cJSON_AddStringToObject(failure, "code", "camera_fetch_failed");
+                cJSON_AddStringToObject(failure, "message",
+                                        error ? error : "camera fetch failed");
+            }
+        }
+        free(image);
+    } else {
+        result = lichuang_camera_saved_list();
+    }
+    if (!result) {
+        result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", false);
+        cJSON *failure = cJSON_AddObjectToObject(result, "error");
+        if (failure) {
+            cJSON_AddStringToObject(failure, "code", "out_of_memory");
+            cJSON_AddStringToObject(failure, "message", "failed to read the photo list");
+        }
+    }
     noise_ctrl_send_command_result(args->session_generation, args->request_id, result);
     free(args);
     stack_monitor_record(NULL);
@@ -1899,16 +1971,47 @@ static cJSON *on_ws_command(
         return result;
     }
 #endif
-#if CONFIG_MUSE_WATCHER_CAMERA
+#if CONFIG_MUSE_WATCHER_CAMERA || CONFIG_MUSE_LICHUANG_CAMERA
     if (strcmp(command, "camera.capture") == 0) {
-        watcher_camera_task_args_t *args = calloc(1, sizeof(*args));
+        camera_capture_task_args_t *args = calloc(1, sizeof(*args));
         if (!args) return command_error("out_of_memory", "failed to allocate camera request");
         args->session_generation = session_generation;
         strncpy(args->request_id, request_id, sizeof(args->request_id) - 1);
-        if (xTaskCreateWithCaps(watcher_camera_capture_task, "camera_capture", 8192,
+        if (xTaskCreateWithCaps(camera_capture_task, "camera_capture", 16384,
                                 args, 4, NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
             free(args);
             return command_error("out_of_memory", "failed to start camera capture");
+        }
+        cJSON *async = cJSON_CreateObject();
+        cJSON_AddBoolToObject(async, "_async", true);
+        return async;
+    }
+#endif
+#if CONFIG_MUSE_LICHUANG_CAMERA
+    if (strcmp(command, "camera.saved_list") == 0 ||
+        strcmp(command, "camera.fetch") == 0) {
+        bool fetch = strcmp(command, "camera.fetch") == 0;
+        camera_card_task_args_t *args = calloc(1, sizeof(*args));
+        if (!args) return command_error("out_of_memory", "failed to allocate camera request");
+        args->session_generation = session_generation;
+        strncpy(args->request_id, request_id, sizeof(args->request_id) - 1);
+        if (fetch) {
+            cJSON *name = cJSON_GetObjectItem(params, "name");
+            if (!cJSON_IsString(name) || !name->valuestring || !name->valuestring[0]) {
+                free(args);
+                return command_error("missing_param", "name is required");
+            }
+            if (strlen(name->valuestring) >= sizeof(args->name)) {
+                free(args);
+                return command_error("invalid_params", "name is too long");
+            }
+            snprintf(args->name, sizeof(args->name), "%.*s",
+                     (int)sizeof(args->name) - 1, name->valuestring);
+        }
+        if (xTaskCreateWithCaps(camera_card_task, "camera_card", 16384,
+                                args, 4, NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+            free(args);
+            return command_error("out_of_memory", "failed to start camera card task");
         }
         cJSON *async = cJSON_CreateObject();
         cJSON_AddBoolToObject(async, "_async", true);

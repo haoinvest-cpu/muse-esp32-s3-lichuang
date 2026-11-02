@@ -45,7 +45,8 @@ if(CONFIG_MUSE_ENABLED)
         "muse_keypad.c"
         "muse_lv_mem.c"
         "muse_link.c"
-        "muse_ble.c")
+        "muse_ble.c"
+        "muse_sd.c")
     if(CONFIG_MUSE_HATCH)
         list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
         list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
@@ -98,6 +99,9 @@ if(CONFIG_MUSE_ENABLED)
         list(APPEND srcs "boards/board_m5stack_core2.c")
     elseif(CONFIG_MUSE_BOARD_LICHUANG_SZP)
         list(APPEND srcs "boards/board_lichuang_szp.c")
+        if(CONFIG_MUSE_LICHUANG_CAMERA)
+            list(APPEND srcs "boards/lichuang_camera.c" "boards/lichuang_cam_mode.c")
+        endif()
     elseif(CONFIG_MUSE_BOARD_FNK0104B)
         list(APPEND srcs "boards/board_fnk0104b.c")
     elseif(CONFIG_MUSE_BOARD_GUITION_JC3248W535)

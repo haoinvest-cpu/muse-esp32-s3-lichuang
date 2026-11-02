@@ -68,3 +68,11 @@ tools/muse/board.sh flash szp
 感谢 Meta 开源的 Muse Gadgets 固件，以及 Liu-zhongxian（Drunk）完成的立创 S3 移植工作；本仓库是在该移植的基础上继续修改的。
 
 本仓库许可证随上游，为 Apache-2.0。
+
+## 2026-11-02 · 相机模式大改版
+
+- 新增相机模式：双击语音键进入，取景/拍照存 SD 卡/长按退出恢复语音（`lichuang_cam_mode.c`）。
+- 新增 `camera.saved_list` / `camera.fetch` 与退出后主动报数，照片可回聊天查看识别；拍照同步生成 320×240 交付小图，远程 `camera.capture` 亦附带小图。
+- GC0308 镜像改软件翻转（寄存器实测无效）；`CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=16384` 根治相机间歇初始化失败。
+- SD 卡挂载抽为公共模块 `muse_sd`，与 SHT31 日志共用。
+

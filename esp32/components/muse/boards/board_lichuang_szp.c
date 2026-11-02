@@ -48,6 +48,12 @@
 #include "muse_wake.h"
 #include "muse_weather.h"
 
+#ifdef CONFIG_MUSE_LICHUANG_CAMERA
+#include "camera_gc0308.h"
+#include "boards/lichuang_camera.h"
+#include "boards/lichuang_cam_mode.h"
+#endif
+
 static const char *TAG = "board";
 
 #define LCD_H_RES 320
@@ -93,6 +99,29 @@ static esp_err_t exp_write(uint8_t reg, uint8_t value)
     const uint8_t data[] = { reg, value };
     return i2c_master_transmit(s_exp, data, sizeof(data), 100);
 }
+
+static esp_err_t exp_read(uint8_t reg, uint8_t *value)
+{
+    return i2c_master_transmit_receive(s_exp, &reg, 1, value, 1, 100);
+}
+
+#ifdef CONFIG_MUSE_LICHUANG_CAMERA
+/* Drives the gc0308 PWDN via PCA9557 bit 2 (active high). Preserves the
+ * LCD_CS and PA_EN bits: read-modify-write on the Output Port register. */
+static esp_err_t lichuang_szp_camera_power(bool on)
+{
+    uint8_t out;
+    ESP_RETURN_ON_ERROR(exp_read(EXP_OUTPUT, &out), TAG, "expander read");
+    if (on) {
+        out &= ~EXP_CAMERA_PWDN;  /* release PWDN: power on */
+    } else {
+        out |= EXP_CAMERA_PWDN;   /* assert PWDN: power down */
+    }
+    ESP_RETURN_ON_ERROR(exp_write(EXP_OUTPUT, out), TAG, "expander write");
+    ESP_LOGI(TAG, "camera power %s (expander 0x%02x)", on ? "on" : "off", out);
+    return ESP_OK;
+}
+#endif
 
 static esp_err_t init(void)
 {
@@ -149,6 +178,19 @@ static esp_err_t init(void)
         .scl_speed_hz = 100000,
     };
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_i2c, &touch_cfg, &s_touch_dev), TAG, "touch i2c");
+
+#ifdef CONFIG_MUSE_LICHUANG_CAMERA
+    ESP_RETURN_ON_ERROR(lichuang_camera_prepare(), TAG, "camera lock");
+    const camera_gc0308_config_t cam = {
+        .name = "gc0308 (Lichuang SZP ESP32-S3)",
+        .power = lichuang_szp_camera_power,
+    };
+    camera_register(camera_gc0308(&cam));
+    ESP_LOGI(TAG, "gc0308 camera registered");
+    /* Camera mode (the talk key's double tap) drives the same sensor, so it
+     * needs the same power switch. */
+    ESP_RETURN_ON_ERROR(lichuang_cam_mode_prepare(lichuang_szp_camera_power), TAG, "camera mode");
+#endif
 
     return muse_gpio_button_init(&s_talk, TALK_GPIO);
 }

@@ -1413,13 +1413,33 @@ static char *build_register_json(void) {
                 nullptr, nullptr);
 #endif
 
-#if CONFIG_MUSE_WATCHER_CAMERA
+#if CONFIG_MUSE_WATCHER_CAMERA || CONFIG_MUSE_LICHUANG_CAMERA
     add_command(commands, "camera.capture",
-                "Capture one still JPEG frame from the SenseCAP Watcher camera. "
+                "Capture one still JPEG frame from the board camera. "
                 "The frame is returned as base64 only when this command is explicitly invoked.",
                 nullptr, nullptr);
     cJSON_AddNumberToObject(
         cJSON_GetObjectItem(commands, "camera.capture"), "timeout_ms", 30000);
+#endif
+#if CONFIG_MUSE_LICHUANG_CAMERA
+    // The photos the Lichuang's camera mode saved to its TF card, for the chat
+    // to fetch and look at; the board side lives in lichuang_camera.c.
+    add_command(commands, "camera.saved_list",
+                "List the photos on the board's TF card: name and size in bytes, "
+                "by file name, at most 50. An empty list when there is no card.",
+                nullptr, nullptr);
+    cJSON_AddNumberToObject(
+        cJSON_GetObjectItem(commands, "camera.saved_list"), "timeout_ms", 30000);
+    cJSON *fetch_required = cJSON_CreateObject();
+    cJSON_AddItemToObject(fetch_required, "name",
+                          string_param("A name from camera.saved_list, such as IMG_0001.jpg."));
+    add_command(commands, "camera.fetch",
+                "Fetch one photo from the board's TF card as base64 JPEG, for "
+                "sending to the chat. It is a read-only copy; the file stays on "
+                "the card.",
+                fetch_required, nullptr);
+    cJSON_AddNumberToObject(
+        cJSON_GetObjectItem(commands, "camera.fetch"), "timeout_ms", 60000);
 #endif
 
     if (ota_is_enabled()) {
