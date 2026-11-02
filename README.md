@@ -16,6 +16,8 @@ limitations under the License.
 
 # Muse · 立创实战派 ESP32-S3 适配
 
+中文 | [English](README.en.md)
+
 针对**立创实战派 ESP32-S3 N16R8** 的 Muse 适配版本，重点解决 **2 英寸、320×240 横屏**上的 UI 布局、中英文显示，以及屏幕和配网问题。
 
 适用配置：**16 MB Flash / 8 MB PSRAM，ST7789 屏幕、FT6336 触摸**。
@@ -39,6 +41,8 @@ limitations under the License.
 - **相机内存根治**：`CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=16384`，解决 DMA 缓冲申请（30,720 B）大于固件稳态最大连续内存块（26,624 B）造成的间歇初始化失败。
 
 注：`components/camera/camera_gc0308.c` 为早期参考实现，不参与构建，现行后端为 `camera_dvp.c`；本发布不含本地 TTS 实验代码。构建：`tools/muse/board.sh build szp`。
+
+**使用与排障**：[相机模式手册](docs/lichuang/camera-mode.md)——含给 AI 助手的执行说明、构建烧录步骤、按症状的常见问题与回滚办法（[English](docs/lichuang/camera-mode.en.md)）。
 
 
 ## 界面效果
